@@ -45,6 +45,9 @@ class NotchViewModel: ObservableObject {
     @Published var openReason: NotchOpenReason = .unknown
     @Published var contentType: NotchContentType = .instances
     @Published var isHovering: Bool = false
+    @Published var hasPendingPermissions: Bool = false
+    @Published var selectedPendingSessionId: String?
+    @Published var instanceCount: Int = 0
 
     // MARK: - Dependencies
 
@@ -77,11 +80,38 @@ class NotchViewModel: ObservableObject {
                 height: 420 + screenSelector.expandedPickerHeight + soundSelector.expandedPickerHeight
             )
         case .instances:
+            let rowHeight: CGFloat = 52
+            let chrome: CGFloat = 60
+            let contentHeight = CGFloat(max(instanceCount, 1)) * rowHeight + chrome
             return CGSize(
                 width: min(screenRect.width * 0.4, 480),
-                height: 320
+                height: min(max(contentHeight, 120), 400)
             )
         }
+    }
+
+    // MARK: - Pending Selection
+
+    func reconcilePendingSelection(pendingSessionIds: [String]) {
+        if pendingSessionIds.isEmpty {
+            selectedPendingSessionId = nil
+            return
+        }
+        if let selected = selectedPendingSessionId, pendingSessionIds.contains(selected) {
+            return
+        }
+        selectedPendingSessionId = pendingSessionIds.first
+    }
+
+    func cyclePendingSelection(direction: Int, pendingSessionIds: [String]) {
+        guard pendingSessionIds.count > 1 else { return }
+        guard let current = selectedPendingSessionId,
+              let currentIndex = pendingSessionIds.firstIndex(of: current) else {
+            selectedPendingSessionId = pendingSessionIds.first
+            return
+        }
+        let nextIndex = (currentIndex + direction + pendingSessionIds.count) % pendingSessionIds.count
+        selectedPendingSessionId = pendingSessionIds[nextIndex]
     }
 
     // MARK: - Animation
@@ -178,9 +208,12 @@ class NotchViewModel: ObservableObject {
         switch status {
         case .opened:
             if geometry.isPointOutsidePanel(location, size: openedSize) {
-                notchClose()
-                // Re-post the click so it reaches the window/app behind us
-                repostClickAt(location)
+                if hasPendingPermissions {
+                    repostClickAt(location)
+                } else {
+                    notchClose()
+                    repostClickAt(location)
+                }
             } else if geometry.notchScreenRect.contains(location) {
                 // Clicking notch while opened - only close if NOT in chat mode
                 if !isInChatMode {

@@ -190,7 +190,7 @@ struct NotchView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             sessionMonitor.startMonitoring()
-            // On non-notched devices, keep visible so users have a target to interact with
+            KeyboardShortcutHandler.shared.start(sessionMonitor: sessionMonitor, viewModel: viewModel)
             if !viewModel.hasPhysicalNotch {
                 isVisible = true
             }
@@ -199,9 +199,20 @@ struct NotchView: View {
             handleStatusChange(from: oldStatus, to: newStatus)
         }
         .onChange(of: sessionMonitor.pendingInstances) { _, sessions in
+            viewModel.hasPendingPermissions = sessions.contains { $0.phase.isWaitingForApproval }
+            let approvalIds = sessions
+                .filter { $0.phase.isWaitingForApproval }
+                .sorted { a, b in
+                    let dateA = a.lastUserMessageDate ?? a.lastActivity
+                    let dateB = b.lastUserMessageDate ?? b.lastActivity
+                    return dateA > dateB
+                }
+                .map { $0.sessionId }
+            viewModel.reconcilePendingSelection(pendingSessionIds: approvalIds)
             handlePendingSessionsChange(sessions)
         }
         .onChange(of: sessionMonitor.instances) { _, instances in
+            viewModel.instanceCount = instances.count
             handleProcessingChange()
             handleWaitingForInputChange(instances)
         }
