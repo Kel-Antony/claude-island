@@ -90,12 +90,14 @@ struct ClaudeInstancesView: View {
     // MARK: - Actions
 
     private func focusSession(_ session: SessionState) {
-        guard session.isInTmux else { return }
-
         Task {
             if let pid = session.pid {
-                _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
-            } else {
+                if session.isInTmux, await WindowFinder.shared.isYabaiAvailable() {
+                    _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
+                } else {
+                    _ = await NativeTerminalInputHandler.shared.focusTerminal(pid: pid, tty: session.tty)
+                }
+            } else if session.isInTmux {
                 _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
             }
         }
@@ -136,7 +138,6 @@ struct InstanceRow: View {
 
     @State private var isHovered = false
     @State private var spinnerPhase = 0
-    @State private var isYabaiAvailable = false
 
     private let claudeOrange = Color(red: 0.85, green: 0.47, blue: 0.34)
     private let spinnerSymbols = ["·", "✢", "✳", "∗", "✻", "✽"]
@@ -153,6 +154,24 @@ struct InstanceRow: View {
         return toolName == "AskUserQuestion"
     }
 
+    /// Status text based on session phase (fallback when no message content)
+    private var phaseStatusText: String {
+        switch session.phase {
+        case .processing:
+            return "Processing..."
+        case .compacting:
+            return "Compacting..."
+        case .waitingForInput:
+            return "Ready"
+        case .waitingForApproval:
+            return "Waiting for approval"
+        case .idle:
+            return "Idle"
+        case .ended:
+            return "Ended"
+        }
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             // State indicator on left
@@ -161,10 +180,19 @@ struct InstanceRow: View {
 
             // Text content
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.displayTitle)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(session.displayTitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+
+                    // Token usage indicator
+                    if session.usage.totalTokens > 0 {
+                        Text(session.usage.formattedTotal)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.3))
+                    }
+                }
 
                 // Show tool call when waiting for approval, otherwise last activity
                 if isWaitingForApproval, let toolName = session.pendingToolName {
@@ -229,6 +257,12 @@ struct InstanceRow: View {
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.4))
                         .lineLimit(1)
+                } else {
+                    // Fallback: show phase-based status when no message content
+                    Text(phaseStatusText)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.35))
+                        .lineLimit(1)
                 }
             }
 
@@ -242,10 +276,10 @@ struct InstanceRow: View {
                         onChat()
                     }
 
-                    // Go to Terminal button (only if yabai available)
-                    if isYabaiAvailable {
+                    // Go to Terminal button
+                    if session.pid != nil {
                         TerminalButton(
-                            isEnabled: session.isInTmux,
+                            isEnabled: true,
                             onTap: { onFocus() }
                         )
                     }
@@ -266,9 +300,9 @@ struct InstanceRow: View {
                         onChat()
                     }
 
-                    // Focus icon (only for tmux instances with yabai)
-                    if session.isInTmux && isYabaiAvailable {
-                        IconButton(icon: "eye") {
+                    // Terminal focus icon - show when we have a PID to find terminal
+                    if session.pid != nil {
+                        IconButton(icon: "terminal") {
                             onFocus()
                         }
                     }
@@ -287,8 +321,11 @@ struct InstanceRow: View {
         .padding(.trailing, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .onTapGesture {
+        .onTapGesture(count: 2) {
             onChat()
+        }
+        .onTapGesture(count: 1) {
+            onFocus()
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isWaitingForApproval)
         .background(
@@ -306,9 +343,6 @@ struct InstanceRow: View {
         }
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isSelected)
         .onHover { isHovered = $0 }
-        .task {
-            isYabaiAvailable = await WindowFinder.shared.isYabaiAvailable()
-        }
     }
 
     @ViewBuilder

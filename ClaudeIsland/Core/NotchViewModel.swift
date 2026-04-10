@@ -53,6 +53,7 @@ class NotchViewModel: ObservableObject {
 
     private let screenSelector = ScreenSelector.shared
     private let soundSelector = SoundSelector.shared
+    private let suppressionSelector = SuppressionSelector.shared
 
     // MARK: - Geometry
 
@@ -77,7 +78,7 @@ class NotchViewModel: ObservableObject {
             // Compact size for settings menu
             return CGSize(
                 width: min(screenRect.width * 0.4, 480),
-                height: 420 + screenSelector.expandedPickerHeight + soundSelector.expandedPickerHeight
+                height: 420 + screenSelector.expandedPickerHeight + soundSelector.expandedPickerHeight + suppressionSelector.expandedPickerHeight
             )
         case .instances:
             let rowHeight: CGFloat = 52
@@ -125,6 +126,7 @@ class NotchViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let events = EventMonitors.shared
     private var hoverTimer: DispatchWorkItem?
+    private var closeTimer: DispatchWorkItem?
 
     // MARK: - Initialization
 
@@ -132,7 +134,8 @@ class NotchViewModel: ObservableObject {
         self.geometry = NotchGeometry(
             deviceNotchRect: deviceNotchRect,
             screenRect: screenRect,
-            windowHeight: windowHeight
+            windowHeight: windowHeight,
+            isPillMode: !hasPhysicalNotch
         )
         self.hasPhysicalNotch = hasPhysicalNotch
         setupEventHandlers()
@@ -145,6 +148,10 @@ class NotchViewModel: ObservableObject {
             .store(in: &cancellables)
 
         soundSelector.$isPickerExpanded
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        suppressionSelector.$isPickerExpanded
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
@@ -165,6 +172,31 @@ class NotchViewModel: ObservableObject {
                 self?.handleMouseDown()
             }
             .store(in: &cancellables)
+
+        events.rightMouseDown
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                self?.handleRightMouseDown(event)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func handleRightMouseDown(_ event: NSEvent) {
+        let location = NSEvent.mouseLocation
+        let inPill = geometry.isPointInNotch(location)
+        let inOpened = status == .opened && geometry.isPointInOpenedPanel(location, size: openedSize)
+        guard inPill || inOpened else { return }
+
+        let menu = NSMenu()
+        let quitItem = NSMenuItem(
+            title: "Quit Claude Island",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        quitItem.target = NSApp
+        menu.addItem(quitItem)
+        let anchorView: NSView = NSApp.windows.first?.contentView ?? NSView()
+        NSMenu.popUpContextMenu(menu, with: event, for: anchorView)
     }
 
     /// Whether we're in chat mode (sticky behavior)
@@ -187,9 +219,11 @@ class NotchViewModel: ObservableObject {
 
         isHovering = newHovering
 
-        // Cancel any pending hover timer
+        // Cancel any pending timers
         hoverTimer?.cancel()
         hoverTimer = nil
+        closeTimer?.cancel()
+        closeTimer = nil
 
         // Start hover timer to auto-expand after 1 second
         if isHovering && (status == .closed || status == .popping) {
@@ -198,7 +232,18 @@ class NotchViewModel: ObservableObject {
                 self.notchOpen(reason: .hover)
             }
             hoverTimer = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+        }
+
+        // Start close timer when mouse leaves an opened (hover-triggered) panel.
+        // Chat mode is sticky and must be dismissed explicitly.
+        if !isHovering && status == .opened && openReason == .hover && !isInChatMode {
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self, !self.isHovering, self.status == .opened else { return }
+                self.notchClose()
+            }
+            closeTimer = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
         }
     }
 

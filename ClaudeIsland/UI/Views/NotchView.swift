@@ -9,10 +9,16 @@ import AppKit
 import CoreGraphics
 import SwiftUI
 
-// Corner radius constants
+// Corner radius constants for notch mode
 private let cornerRadiusInsets = (
     opened: (top: CGFloat(19), bottom: CGFloat(24)),
     closed: (top: CGFloat(6), bottom: CGFloat(14))
+)
+
+// Corner radius constants for pill mode (external displays without notch)
+private let pillCornerRadius = (
+    opened: CGFloat(20),
+    closed: CGFloat(12)
 )
 
 struct NotchView: View {
@@ -52,6 +58,16 @@ struct NotchView: View {
             }
             return false
         }
+    }
+
+    /// Sessions that are active (not idle/ended) - used for dots display
+    private var activeSessions: [SessionState] {
+        sessionMonitor.instances.filter { $0.phase != .ended && $0.phase != .idle }
+    }
+
+    /// Whether we have multiple active sessions to show dots for
+    private var hasMultipleActiveSessions: Bool {
+        activeSessions.count > 1
     }
 
     // MARK: - Sizing
@@ -108,23 +124,24 @@ struct NotchView: View {
 
     // MARK: - Corner Radii
 
+    private var isPillMode: Bool { !viewModel.hasPhysicalNotch }
+
     private var topCornerRadius: CGFloat {
-        viewModel.status == .opened
+        if isPillMode {
+            return viewModel.status == .opened ? pillCornerRadius.opened : pillCornerRadius.closed
+        }
+        return viewModel.status == .opened
             ? cornerRadiusInsets.opened.top
             : cornerRadiusInsets.closed.top
     }
 
     private var bottomCornerRadius: CGFloat {
-        viewModel.status == .opened
+        if isPillMode {
+            return viewModel.status == .opened ? pillCornerRadius.opened : pillCornerRadius.closed
+        }
+        return viewModel.status == .opened
             ? cornerRadiusInsets.opened.bottom
             : cornerRadiusInsets.closed.bottom
-    }
-
-    private var currentNotchShape: NotchShape {
-        NotchShape(
-            topCornerRadius: topCornerRadius,
-            bottomCornerRadius: bottomCornerRadius
-        )
     }
 
     // Animation springs
@@ -137,6 +154,11 @@ struct NotchView: View {
         ZStack(alignment: .top) {
             // Outer container does NOT receive hits - only the notch content does
             VStack(spacing: 0) {
+                // In pill mode, add a top gap so the pill sits within the menu bar
+                if isPillMode {
+                    Spacer().frame(height: 5)
+                }
+
                 notchLayout
                     .frame(
                         maxWidth: viewModel.status == .opened ? notchSize.width : nil,
@@ -145,21 +167,27 @@ struct NotchView: View {
                     .padding(
                         .horizontal,
                         viewModel.status == .opened
-                            ? cornerRadiusInsets.opened.top
-                            : cornerRadiusInsets.closed.bottom
+                            ? (isPillMode ? pillCornerRadius.opened : cornerRadiusInsets.opened.top)
+                            : (isPillMode ? pillCornerRadius.closed : cornerRadiusInsets.closed.bottom)
                     )
                     .padding([.horizontal, .bottom], viewModel.status == .opened ? 12 : 0)
                     .background(.black)
-                    .clipShape(currentNotchShape)
+                    .clipShape(isPillMode
+                        ? AnyShape(PillShape(cornerRadius: viewModel.status == .opened ? pillCornerRadius.opened : pillCornerRadius.closed))
+                        : AnyShape(NotchShape(topCornerRadius: topCornerRadius, bottomCornerRadius: bottomCornerRadius))
+                    )
                     .overlay(alignment: .top) {
-                        Rectangle()
-                            .fill(.black)
-                            .frame(height: 1)
-                            .padding(.horizontal, topCornerRadius)
+                        // Top-edge line only needed in notch mode to blend with the physical notch
+                        if !isPillMode {
+                            Rectangle()
+                                .fill(.black)
+                                .frame(height: 1)
+                                .padding(.horizontal, topCornerRadius)
+                        }
                     }
                     .shadow(
-                        color: (viewModel.status == .opened || isHovering) ? .black.opacity(0.7) : .clear,
-                        radius: 6
+                        color: (viewModel.status == .opened || isHovering || isPillMode) ? .black.opacity(0.7) : .clear,
+                        radius: isPillMode && viewModel.status != .opened ? 4 : 6
                     )
                     .frame(
                         maxWidth: viewModel.status == .opened ? notchSize.width : nil,
@@ -191,8 +219,9 @@ struct NotchView: View {
         .onAppear {
             sessionMonitor.startMonitoring()
             KeyboardShortcutHandler.shared.start(sessionMonitor: sessionMonitor, viewModel: viewModel)
+            // Pill mode: only show when there are active sessions
             if !viewModel.hasPhysicalNotch {
-                isVisible = true
+                isVisible = !sessionMonitor.instances.isEmpty
             }
         }
         .onChange(of: viewModel.status) { oldStatus, newStatus in
@@ -215,6 +244,12 @@ struct NotchView: View {
             viewModel.instanceCount = instances.count
             handleProcessingChange()
             handleWaitingForInputChange(instances)
+            // Pill mode: show/hide based on active sessions
+            if !viewModel.hasPhysicalNotch && viewModel.status != .opened {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isVisible = !instances.isEmpty
+                }
+            }
         }
     }
 
@@ -224,9 +259,9 @@ struct NotchView: View {
         activityCoordinator.expandingActivity.show && activityCoordinator.expandingActivity.type == .claude
     }
 
-    /// Whether to show the expanded closed state (processing, pending permission, or waiting for input)
+    /// Whether to show the expanded closed state (processing, pending permission, waiting for input, or multiple active sessions)
     private var showClosedActivity: Bool {
-        isProcessing || hasPendingPermission || hasWaitingForInput
+        isProcessing || hasPendingPermission || hasWaitingForInput || hasMultipleActiveSessions
     }
 
     @ViewBuilder
@@ -252,10 +287,69 @@ struct NotchView: View {
         }
     }
 
+    // MARK: - Pill Status Text
+
+    /// Attributed status for pill mode with distinct colors for running vs idle
+    private var pillStatusText: Text {
+        let running = sessionMonitor.instances.filter { session in
+            session.phase != .idle && session.phase != .ended
+        }.count
+        let idle = sessionMonitor.instances.count - running
+        var result = Text("")
+        if running > 0 {
+            result = result + Text("\(running) running").foregroundColor(.white)
+        }
+        if running > 0 && idle > 0 {
+            result = result + Text("  ").foregroundColor(.clear)
+        }
+        if idle > 0 {
+            result = result + Text("\(idle) idle").foregroundColor(.white.opacity(0.4))
+        }
+        return result
+    }
+
     // MARK: - Header Row (persists across states)
 
     @ViewBuilder
     private var headerRow: some View {
+        if isPillMode && viewModel.status != .opened {
+            // Pill mode: compact status line sized to content
+            pillClosedRow
+        } else {
+            notchHeaderRow
+        }
+    }
+
+    /// Pill closed state: [crab] [dots?] [X running, Y idle] [spinner?]
+    @ViewBuilder
+    private var pillClosedRow: some View {
+        HStack(spacing: 10) {
+            ClaudeCrabIcon(size: 11, animateLegs: isAnyProcessing)
+                .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: viewModel.status != .opened)
+
+            if hasMultipleActiveSessions {
+                SessionStateDots(sessions: activeSessions)
+            }
+
+            pillStatusText
+                .font(.system(size: 11, weight: .medium))
+                .fixedSize()
+
+            if isProcessing || hasPendingPermission {
+                ProcessingSpinner()
+                    .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: viewModel.status != .opened)
+                    .frame(width: 12, height: 12)
+            } else if hasWaitingForInput {
+                ReadyForInputIndicatorIcon(size: 12, color: TerminalColors.green)
+                    .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: viewModel.status != .opened)
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
+    /// Original notch-mode header (or opened state header for both modes)
+    @ViewBuilder
+    private var notchHeaderRow: some View {
         HStack(spacing: 0) {
             // Left side - crab + optional permission indicator (visible when processing, pending, or waiting for input)
             if showClosedActivity {
@@ -273,6 +367,12 @@ struct NotchView: View {
                 .padding(.leading, viewModel.status == .opened ? 8 : 0)
             }
 
+            // Session state dots (only when closed with multiple active/attention-needed sessions)
+            if viewModel.status != .opened && hasMultipleActiveSessions {
+                SessionStateDots(sessions: activeSessions)
+                    .padding(.leading, 6)
+            }
+
             // Center content
             if viewModel.status == .opened {
                 // Opened: show header content
@@ -284,9 +384,11 @@ struct NotchView: View {
                     .frame(width: closedNotchSize.width - 20)
             } else {
                 // Closed with activity: black spacer (with optional bounce)
+                // Reduce spacer when showing session dots
+                let dotsWidth: CGFloat = hasMultipleActiveSessions ? CGFloat(min(activeSessions.count, 8) * 10 + 6) : 0
                 Rectangle()
                     .fill(.black)
-                    .frame(width: closedNotchSize.width - cornerRadiusInsets.closed.top + (isBouncing ? 16 : 0))
+                    .frame(width: max(20, closedNotchSize.width - cornerRadiusInsets.closed.top - dotsWidth) + (isBouncing ? 16 : 0))
             }
 
             // Right side - spinner when processing/pending, checkmark when waiting for input
@@ -401,7 +503,7 @@ struct NotchView: View {
             // Don't hide on non-notched devices - users need a visible target
             if viewModel.status == .closed && viewModel.hasPhysicalNotch {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    if !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && viewModel.status == .closed {
+                    if !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && !hasMultipleActiveSessions && viewModel.status == .closed {
                         isVisible = false
                     }
                 }
@@ -418,10 +520,15 @@ struct NotchView: View {
                 waitingForInputTimestamps.removeAll()
             }
         case .closed:
-            // Don't hide on non-notched devices - users need a visible target
-            guard viewModel.hasPhysicalNotch else { return }
+            // Pill mode: hide if no sessions
+            if !viewModel.hasPhysicalNotch {
+                if sessionMonitor.instances.isEmpty {
+                    withAnimation(.easeInOut(duration: 0.2)) { isVisible = false }
+                }
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && !activityCoordinator.expandingActivity.show {
+                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && !hasMultipleActiveSessions && !activityCoordinator.expandingActivity.show {
                     isVisible = false
                 }
             }
@@ -497,18 +604,23 @@ struct NotchView: View {
     }
 
     /// Determine if notification sound should play for the given sessions
-    /// Returns true if ANY session is not actively focused
+    /// Returns true if sound should play, false if suppressed
     private func shouldPlayNotificationSound(for sessions: [SessionState]) async -> Bool {
+        let mode = AppSettings.soundSuppression
+
+        // Never suppress - always play
+        if mode == .never { return true }
+
+        // Suppress if Claude Island is active (menu/chat open)
+        if NSApplication.shared.isActive { return false }
+
+        // Both .whenFocused and .whenVisible currently check frontmost-based focus
+        // (OcclusionKit integration for true visibility detection is a future enhancement)
         for session in sessions {
-            guard let pid = session.pid else {
-                // No PID means we can't check focus, assume not focused
-                return true
-            }
+            guard let pid = session.pid else { return true }
 
             let isFocused = await TerminalVisibilityDetector.isSessionFocused(sessionPid: pid)
-            if !isFocused {
-                return true
-            }
+            if !isFocused { return true }
         }
 
         return false

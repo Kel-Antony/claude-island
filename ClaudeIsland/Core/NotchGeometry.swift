@@ -13,6 +13,7 @@ struct NotchGeometry: Sendable {
     let deviceNotchRect: CGRect
     let screenRect: CGRect
     let windowHeight: CGFloat
+    let isPillMode: Bool
 
     /// The notch rect in screen coordinates (for hit testing with global mouse position)
     var notchScreenRect: CGRect {
@@ -26,9 +27,10 @@ struct NotchGeometry: Sendable {
 
     /// The opened panel rect in screen coordinates for a given size
     func openedScreenRect(for size: CGSize) -> CGRect {
-        // Match the actual rendered panel size (tuned to match visual output)
+        // Slight horizontal trim to match the rendered shape, but keep full
+        // vertical extent so tall menus (with expanded pickers) stay hoverable.
         let width = size.width - 6
-        let height = size.height - 30
+        let height = size.height
         return CGRect(
             x: screenRect.midX - width / 2,
             y: screenRect.maxY - height,
@@ -37,9 +39,12 @@ struct NotchGeometry: Sendable {
         )
     }
 
-    /// Check if a point is in the notch area (with padding for easier interaction)
+    /// Check if a point is in the notch area (with padding for easier interaction).
+    /// Pill mode uses larger padding since the pill is smaller than the notch.
     func isPointInNotch(_ point: CGPoint) -> Bool {
-        notchScreenRect.insetBy(dx: -10, dy: -5).contains(point)
+        let dx: CGFloat = isPillMode ? -60 : -10
+        let dy: CGFloat = isPillMode ? -8 : -5
+        return notchScreenRect.insetBy(dx: dx, dy: dy).contains(point)
     }
 
     /// Check if a point is in the opened panel area

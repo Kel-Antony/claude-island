@@ -30,6 +30,12 @@ actor SessionStore {
     /// Sync debounce interval (100ms)
     private let syncDebounceNs: UInt64 = 100_000_000
 
+    /// Periodic status check task
+    private var statusCheckTask: Task<Void, Never>?
+
+    /// Status check interval (3 seconds)
+    private let statusCheckIntervalSeconds: UInt64 = 3
+
     // MARK: - Published State (for UI)
 
     /// Publisher for session state changes (nonisolated for Combine subscription from any context)
@@ -909,6 +915,16 @@ actor SessionStore {
         // Update conversationInfo (summary, lastMessage, etc.)
         session.conversationInfo = conversationInfo
 
+        // Infer phase from conversation state when loading history
+        // If Claude was the last to respond, the session is waiting for user input
+        if session.phase == .idle {
+            if let lastRole = conversationInfo.lastMessageRole,
+               lastRole == "assistant" || lastRole == "tool" {
+                session.phase = .waitingForInput
+                Self.logger.debug("History loaded: inferred phase .waitingForInput from lastMessageRole=\(lastRole, privacy: .public)")
+            }
+        }
+
         // Convert messages to chat items
         let existingIds = Set(session.chatItems.map { $0.id })
 
@@ -979,6 +995,66 @@ actor SessionStore {
     private func cancelPendingSync(sessionId: String) {
         pendingSyncs[sessionId]?.cancel()
         pendingSyncs.removeValue(forKey: sessionId)
+    }
+
+    // MARK: - Periodic Status Check
+
+    /// Start periodic status checking for all sessions
+    func startPeriodicStatusCheck() {
+        guard statusCheckTask == nil else { return }
+
+        let intervalSeconds = statusCheckIntervalSeconds
+        statusCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalSeconds * 1_000_000_000)
+                guard !Task.isCancelled else { break }
+                await self?.recheckAllSessions()
+            }
+        }
+        Self.logger.info("Started periodic status check (every \(intervalSeconds)s)")
+    }
+
+    /// Stop periodic status checking
+    func stopPeriodicStatusCheck() {
+        statusCheckTask?.cancel()
+        statusCheckTask = nil
+        Self.logger.info("Stopped periodic status check")
+    }
+
+    /// Recheck status of all active sessions
+    private func recheckAllSessions() {
+        for (sessionId, session) in sessions {
+            guard session.phase != .ended else { continue }
+
+            if let pid = session.pid {
+                if !isProcessRunning(pid: pid) {
+                    Self.logger.info("Process \(pid) no longer running, ending session \(sessionId.prefix(8))")
+                    var updatedSession = session
+                    if updatedSession.phase.canTransition(to: .ended) {
+                        updatedSession.phase = .ended
+                        sessions[sessionId] = updatedSession
+                        publishState()
+                    }
+                    continue
+                }
+            }
+
+            let needsSync: Bool
+            switch session.phase {
+            case .processing, .waitingForApproval:
+                needsSync = true
+            default:
+                needsSync = false
+            }
+            if needsSync {
+                scheduleFileSync(sessionId: sessionId, cwd: session.cwd)
+            }
+        }
+    }
+
+    /// Check if a process is still running
+    private nonisolated func isProcessRunning(pid: Int) -> Bool {
+        return kill(Int32(pid), 0) == 0
     }
 
     // MARK: - State Publishing
